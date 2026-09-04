@@ -1,0 +1,3 @@
+[submodule "scripts/taym"]
+	path = scripts/taym
+	url = https://github.com/ruguevara/taym.git
