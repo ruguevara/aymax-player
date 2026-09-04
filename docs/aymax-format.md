@@ -226,24 +226,27 @@ consumption order, not grouped by lane.
 +2  u16 loop_frame
 +4  u16 loop_offset      byte offset (from blob start) of the loop block
 +6  u16 data_offset      byte offset (from blob start) of the first byte
-                         of the interlaced prefix block
-+8  0..40 pad bytes
-     data_offset bytes in, the interlaced prefix block starts
-     loop_offset bytes in, the interlaced loop block starts
+                         of the interlaced prefix block, always 8
++8  interlaced prefix block, then interlaced loop block
 ```
 
-`data_offset` is always `8 + pad`, with `pad` in 0..40. The packer inserts
-pad so that no packet's 2-byte header+first-byte pair starts on the last
-byte of a 16 KiB bank (a reader that pages banks on a byte cursor must not
-split that pair across a page boundary). Continuation literal bytes may
-still land on the last byte of a bank.
+A frame's interlaced bytes must never start at an offset whose low 14 bits
+are `>= 0x3F00` (the last 256 bytes of a bank). A frame consumes at most 40
+bytes (20 lanes x at most 2 bytes each), so a frame that starts before that
+point never crosses a bank boundary. When the next frame would start in the
+last 256 bytes of a bank, the packer emits zero pad bytes up to the next
+multiple of `0x4000` and starts the frame at the bank start instead. The
+rule applies at every frame start, including the first frame of the loop
+block. `loop_offset` may point at such a pad: the runtime bank check at
+frame start skips it. `data_offset` is always 8.
 
 ### 4.6 Bank placement and size cap
 
-The blob (header + pad + prefix block + loop block) must fit in `2 * 16384
-= 32768` bytes. It maps onto consecutive 16 KiB pages at `#C000`, starting
-at hardware bank 0: bytes `0 .. 16383` in bank 0, bytes `16384 .. 32767` in
-bank 1 (if present). A one-bank track occupies only bank 0.
+The blob (header + prefix block + loop block, including any frame-start
+pad) must fit in `2 * 16384 = 32768` bytes. It maps onto consecutive 16 KiB
+pages at `#C000`, starting at hardware bank 0: bytes `0 .. 16383` in bank 0,
+bytes `16384 .. 32767` in bank 1 (if present). A one-bank track occupies
+only bank 0.
 
 `frame_count` must be at least 1; a zero-frame pack is rejected.
 `loop_frame` must satisfy `0 <= loop_frame < frame_count`.
@@ -333,7 +336,7 @@ data contract, so it is not detailed here.
 | Match packet run | 3..130 bytes |
 | Match distance | 1..256 frames (lane bytes) |
 | Packed stream (`.pack`) size | <= 32768 bytes (2 x 16 KiB banks) |
-| Packed stream bank pad | 0..40 bytes after the 8-byte header |
+| Frame start offset (low 14 bits) | `< 0x3F00`; padded to the next bank start otherwise |
 | Asset image (`_assets.bin`) size | 16384 or 32768 bytes |
 | Wavetable block placement | bank 4 only, byte offset 256, must fit whole |
 | Sample placement | one bank only per sample (bank 4 or bank 6) |

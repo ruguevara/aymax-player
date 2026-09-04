@@ -25,15 +25,18 @@ Wire format (all offsets little-endian, relative to blob start):
   +0   u16 frame_count
   +2   u16 loop_frame           first frame of the loop block
   +4   u16 loop_offset          interlaced loop-block offset
-  +6   u16 data_offset          first interlaced byte (8 plus optional pad)
-  +8   optional pad bytes, then interlaced packed bytes
+  +6   u16 data_offset          first interlaced byte, always 8
+  +8   interlaced packed bytes (prefix block, then loop block)
 
-The runtime maps the blob across consecutive 16 KiB banks at #C000.
-A packet pair must not start on the last byte of a bank, because ReadPack
-reads the header and the first extra byte together. The packer inserts
-0..40 pad bytes after the header so that never happens. Continuation
-literals may sit on the last bank byte; the depacker wraps C to the next
-page or bank.
+The runtime maps the blob across consecutive 16 KiB banks at #C000. A
+frame's interlaced bytes must never start at an offset whose low 14 bits
+are >= 0x3F00 (the last 256 bytes of a bank): a frame consumes at most 40
+bytes (20 lanes x at most 2 bytes each), so starting before that point
+keeps the whole frame inside one bank. When the next frame would start
+there, the packer emits zero pad bytes up to the next multiple of 0x4000
+and starts the frame at the bank start instead. The rule applies at every
+frame start, including the first frame of the loop block. loop_offset may
+point at such a pad; the runtime bank check at frame start skips it.
 
 Each lane is split at loop_frame into a prefix block and a loop block. Every
 lane remains an independent LZ packet stream, but the bytes for all 20 lanes
@@ -69,7 +72,6 @@ HEADER_SIZE = 8                 # frame_count, loop_frame, loop_offset, data_off
 BANK_SIZE = 16384
 MAX_PACK_BANKS = 2
 MAX_PACK_SIZE = BANK_SIZE * MAX_PACK_BANKS
-BANK_PAD_MAX = 40               # shift pair starts off the last bank byte
 ASSET_BANK_SIZE = 16384
 MAX_ASSET_BANKS = 2
 SAMPLE_HEADER = 2
@@ -516,10 +518,16 @@ def _runtime_nodes(packed: bytes, out_len: int) -> int:
     return nodes
 
 
-def interlace_block(lanes) -> tuple[bytes, list[int], list[int]]:
+def interlace_block(lanes, base_ofs: int) -> tuple[bytes, list[int], int]:
     """Pack independent lane blocks, then interlace bytes by consumption.
 
-    Returns (interlaced bytes, per-lane packed sizes, pair-start offsets).
+    base_ofs is the absolute blob offset where the block would start with no
+    pad. Before each frame, if the absolute cursor's low 14 bits are
+    >= 0x3F00 (last 256 bytes of a bank), zero pad bytes are emitted up to
+    the next bank start (a multiple of 0x4000), so the frame starts there.
+
+    Returns (interlaced bytes including any leading/inter-frame pad,
+    per-lane packed sizes, end_ofs = base_ofs + len(bytes)).
     Each new packet emits its header and first literal/distance together.
     Later literal bytes emit when their lane is visited; active matches
     consume no packed bytes.
@@ -528,24 +536,28 @@ def interlace_block(lanes) -> tuple[bytes, list[int], list[int]]:
     n = len(lanes[0])
     assert all(len(lane) == n for lane in lanes)
     if n == 0:
-        return b"", [0] * NLANES, []
+        return b"", [0] * NLANES, base_ofs
 
     packed = [pack_block(bytes(lane)) for lane in lanes]
     offsets = [0] * NLANES
     remaining = [0] * NLANES
     literals = [False] * NLANES
     body = bytearray()
-    pair_starts = []
+    cursor = base_ofs
 
     for _frame in range(n):
+        if cursor & (BANK_SIZE - 1) >= BANK_SIZE - 256:
+            pad = (-cursor) % BANK_SIZE
+            body += bytes(pad)
+            cursor += pad
         for k in range(NLANES):
             stream = packed[k]
             if remaining[k] == 0:
                 hdr = stream[offsets[k]]
                 aux = stream[offsets[k] + 1]
                 offsets[k] += 2
-                pair_starts.append(len(body))
                 body += bytes((hdr, aux))
+                cursor += 2
                 if hdr & 0x80:
                     length = (hdr & 0x7F) + MATCH_MIN
                     literals[k] = False
@@ -557,11 +569,12 @@ def interlace_block(lanes) -> tuple[bytes, list[int], list[int]]:
                 if literals[k]:
                     body.append(stream[offsets[k]])
                     offsets[k] += 1
+                    cursor += 1
                 remaining[k] -= 1
 
     assert all(rem == 0 for rem in remaining)
     assert offsets == [len(stream) for stream in packed]
-    return bytes(body), [len(stream) for stream in packed], pair_starts
+    return bytes(body), [len(stream) for stream in packed], cursor
 
 
 def unpack_interlaced_block(blob: bytes, ofs: int, frame_count: int):
@@ -572,6 +585,8 @@ def unpack_interlaced_block(blob: bytes, ofs: int, frame_count: int):
     distances = [0] * NLANES
 
     for _frame in range(frame_count):
+        if ofs & (BANK_SIZE - 1) >= BANK_SIZE - 256:
+            ofs += (-ofs) % BANK_SIZE
         for k in range(NLANES):
             if remaining[k] == 0:
                 hdr = blob[ofs]
@@ -605,17 +620,10 @@ def unpack_interlaced_block(blob: bytes, ofs: int, frame_count: int):
     return [bytes(lane) for lane in lanes], ofs
 
 
-def _bank_pair_pad(pair_starts, data_off: int) -> int:
-    """Return pad so no packet pair starts on the last byte of a 16 KiB bank."""
-    for pad in range(BANK_PAD_MAX + 1):
-        base = data_off + pad
-        if all((base + start) % BANK_SIZE != BANK_SIZE - 1 for start in pair_starts):
-            return pad
-    raise ValueError("cannot shift packet pairs off the last byte of a bank")
-
-
 def _pack_layout(lanes, loop_frame: int):
-    """Return (blob, lane sizes, prefix bytes) for 20 equal-length lanes."""
+    """Return (blob, lane sizes, prefix bytes, data_offset) for 20 equal-length
+    lanes. data_offset is always HEADER_SIZE; frame-start bank padding (see
+    interlace_block) lands inside the prefix/loop bytes instead."""
     assert len(lanes) == NLANES
     n = len(lanes[0])
     assert all(len(lane) == n for lane in lanes)
@@ -625,19 +633,17 @@ def _pack_layout(lanes, loop_frame: int):
     if not 0 <= loop_frame < n:
         raise ValueError(f"loop_frame {loop_frame} outside 0..{n - 1}")
 
-    prefix, prefix_sizes, prefix_starts = interlace_block(
-        [bytes(lane[:loop_frame]) for lane in lanes])
-    loop, loop_sizes, loop_starts = interlace_block(
-        [bytes(lane[loop_frame:]) for lane in lanes])
-    pair_starts = list(prefix_starts)
-    pair_starts.extend(len(prefix) + start for start in loop_starts)
-    pad = _bank_pair_pad(pair_starts, HEADER_SIZE)
-    data_off = HEADER_SIZE + pad
-    loop_ofs = data_off + len(prefix)
+    data_off = HEADER_SIZE
+    prefix, prefix_sizes, loop_ofs = interlace_block(
+        [bytes(lane[:loop_frame]) for lane in lanes], data_off)
+    loop, loop_sizes, end_ofs = interlace_block(
+        [bytes(lane[loop_frame:]) for lane in lanes], loop_ofs)
     hdr = struct.pack("<HHHH", n, loop_frame, loop_ofs, data_off)
     assert len(hdr) == HEADER_SIZE
     lane_sizes = [a + b for a, b in zip(prefix_sizes, loop_sizes)]
-    return hdr + bytes(pad) + prefix + loop, lane_sizes, len(prefix), data_off
+    body = prefix + loop
+    assert data_off + len(body) == end_ofs
+    return hdr + body, lane_sizes, len(prefix), data_off
 
 
 def pack(lanes, loop_frame: int) -> bytes:

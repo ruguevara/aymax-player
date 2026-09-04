@@ -366,21 +366,33 @@ def test_physical_interlace_order():
     print("ok  physical interlace order")
 
 
-def test_packet_pairs_miss_bank_last_byte():
-    n = 250
+def test_frame_starts_skip_bank_tail():
+    # random (near-incompressible) lanes, long enough to cross a 16 KiB
+    # bank boundary at least once.
+    n = 1300
     rng = random.Random(9)
     lanes = [bytes(rng.randrange(256) for _ in range(n))
              for _ in range(psgpack.NLANES)]
-    blob = psgpack.pack(lanes, 80)
-    _n, loop_frame, loop_ofs, data_off = struct.unpack_from("<HHHH", blob, 0)
+    loop_frame = 400
+    blob = psgpack.pack(lanes, loop_frame)
+    _n, hdr_loop, loop_ofs, data_off = struct.unpack_from("<HHHH", blob, 0)
+    assert hdr_loop == loop_frame
+    assert data_off == psgpack.HEADER_SIZE
+    assert len(blob) > psgpack.BANK_SIZE, "test needs a bank crossing"
 
     def walk(ofs, frames):
+        """Replay frame starts like the depacker: skip bank tails, never
+        let a frame's bytes cross a 0x4000 boundary."""
         remaining = [0] * psgpack.NLANES
         literals = [False] * psgpack.NLANES
+        starts = []
         for _ in range(frames):
+            if ofs & (psgpack.BANK_SIZE - 1) >= psgpack.BANK_SIZE - 256:
+                ofs += (-ofs) % psgpack.BANK_SIZE
+            starts.append(ofs)
+            frame_start_bank = ofs // psgpack.BANK_SIZE
             for k in range(psgpack.NLANES):
                 if remaining[k] == 0:
-                    assert ofs % psgpack.BANK_SIZE != psgpack.BANK_SIZE - 1, ofs
                     hdr = blob[ofs]
                     ofs += 2
                     if hdr & 0x80:
@@ -393,11 +405,23 @@ def test_packet_pairs_miss_bank_last_byte():
                     if literals[k]:
                         ofs += 1
                     remaining[k] -= 1
-        return ofs
+            assert (ofs - 1) // psgpack.BANK_SIZE == frame_start_bank, (
+                "frame crossed a bank boundary")
+        return ofs, starts
 
-    assert walk(data_off, loop_frame) == loop_ofs
-    assert walk(loop_ofs, n - loop_frame) == len(blob)
-    print("ok  packet pairs miss bank last byte")
+    end1, starts1 = walk(data_off, loop_frame)
+    assert end1 == loop_ofs
+    end2, starts2 = walk(loop_ofs, n - loop_frame)
+    assert end2 == len(blob)
+
+    for ofs in starts1 + starts2:
+        assert (ofs & (psgpack.BANK_SIZE - 1)) < psgpack.BANK_SIZE - 256
+    # loop_ofs itself may sit in a bank tail; walk() skips it like the runtime.
+
+    out_lanes, out_loop = psgpack.unpack(blob)
+    assert out_loop == loop_frame
+    assert out_lanes == lanes
+    print("ok  frame starts skip bank tail")
 
 
 def _synthetic_six_frames():
@@ -593,7 +617,7 @@ if __name__ == "__main__":
         test_reject_zero_frame_pack,
         test_file_roundtrip_with_loop,
         test_physical_interlace_order,
-        test_packet_pairs_miss_bank_last_byte,
+        test_frame_starts_skip_bank_tail,
         test_build_lanes_and_fills,
         test_asset_indexes_are_validated,
         test_pack_streams_end_to_end,
