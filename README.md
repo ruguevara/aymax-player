@@ -73,6 +73,26 @@ make clean
 Options can be combined. Outputs are `build/<name>.tap` and
 `build/<name>.sna`, where `<name>` is the base name of the `.taym` file.
 
+The Atarin demo track (tekkno lab, 2018) is also included. It uses SID,
+duty, and sampled voices on channel B:
+
+```
+make TAYM=examples/atarin.taym
+```
+
+The source snapshot is not distributed. Pass its path, or set `ATARIN_SNA`
+and omit it:
+
+```
+python3 scripts/atarin2taym.py path/to/snapshot_pentagon.sna -o examples/atarin.taym
+ATARIN_SNA=path/to/snapshot_pentagon.sna python3 -B tests/test_atarin2taym.py
+```
+
+The tests that need the snapshot are skipped when `ATARIN_SNA` is unset.
+Conversion uses the main segment. `scripts/atarinpsg.py` exports PSG diagnostics, and
+`scripts/atarin2ays.py` extracts AYS samples. These tools use the standard
+library; the optional `atarin2ays.py --preview-wav` needs SoundFile.
+
 | Option | Default | Effect |
 |--------|---------|--------|
 | `TAYM=file.taym` | `examples/atarized.taym` | Input track. |
@@ -152,11 +172,13 @@ uses these symbols:
 - `scripts/taym2aymax.py`, `scripts/psgpack.py`, `scripts/aymax_fx.py`,
   `scripts/aymax_assets.py` -- the converter.
 - `scripts/taym/` -- TAYM format package (submodule).
+- `scripts/atarin2taym.py`, `scripts/atarinpsg.py`, `scripts/atarin2ays.py` -- Atarin conversion tools.
 - `docs/aymax-format.md` -- packed track and asset format.
 - `examples/atarized.taym`, `examples/atarized.scr` -- example track
   ("Atarized" by otomata) and its screen.
+- `examples/atarin.taym` -- Atarin main segment with timer and sample events.
 - `tests/` -- converter tests: `python3 tests/test_taym2aymax.py`,
-  `python3 tests/test_psgpack.py`.
+  `python3 tests/test_psgpack.py`, `python3 tests/test_atarin2taym.py`.
 
 ## Notes
 
