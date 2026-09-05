@@ -73,8 +73,11 @@ make clean
 Options can be combined. Outputs are `build/<name>.tap` and
 `build/<name>.sna`, where `<name>` is the base name of the `.taym` file.
 
-The Atarin demo track (tekkno lab, 2018) is also included. It uses SID,
-duty, and sampled voices on channel B:
+The music from the Atarin demo (Techno Lab, 2018; music by Nik-O, code by
+Kowalski; https://demozoo.org/productions/186527/) is also included as
+`examples/atarin.taym`. It is the copyright of its authors and is here
+only as a test track; it is not covered by this repo's MIT license. It
+uses SID, duty, and sampled voices on channel B:
 
 ```
 make TAYM=examples/atarin.taym
@@ -176,7 +179,8 @@ uses these symbols:
 - `docs/aymax-format.md` -- packed track and asset format.
 - `examples/atarized.taym`, `examples/atarized.scr` -- example track
   ("Atarized" by otomata) and its screen.
-- `examples/atarin.taym` -- Atarin main segment with timer and sample events.
+- `examples/atarin.taym` -- Atarin main segment with timer and sample events
+  (music by Nik-O / Techno Lab, copyright of its authors).
 - `tests/` -- converter tests: `python3 tests/test_taym2aymax.py`,
   `python3 tests/test_psgpack.py`, `python3 tests/test_atarin2taym.py`.
 
