@@ -7,7 +7,7 @@
 /____/    \____\    |___|     |___|   \____/   |___|/____/    \____\/____/    \____\
 ```
 
-# AYMax player
+# AYMax player v0.2.0
 
 A standalone player build for [AYMax](https://pixelmatter.org/aymax/), a
 constant-time AY-3-8912 synthesis engine for the ZX Spectrum 128K. This repo takes a track in the
