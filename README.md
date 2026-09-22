@@ -102,23 +102,44 @@ library; the optional `atarin2ays.py --preview-wav` needs SoundFile.
 | `PLAY_ONCE=1` | `0` (loop) | Play the track once, then hold the last frame. With `0` the track restarts from its loop point. |
 | `BORDER=0` | `1` | `1` shows a noise pattern on the border while the track plays. `0` keeps the border black. |
 | `SCREEN=file.scr` | none | 6912-byte ZX screen (pixels + attributes) shown while the track plays. The `.sna` contains it; the tape loads it as the first block. Without it the startup code clears the screen to black. |
+| `COMPACT=1` | `0` | Drop the 128K check and its messages from the BASIC loader (about 380 bytes less tape). |
+| `ENGINE=auto` | `auto` | Engine variant: `auto` picks the smallest binary in `bin/` whose kernel set covers the track; or name one: `full`, `nosamples`, `nowavetables`, `min`, `sid`. A variant that lacks a kernel the track uses fails the build with a message. |
 | `PYTHON=...` | `python3` | Python interpreter used for the converter. |
 | `SJASMPLUS=...` | `sjasmplus` | Assembler binary. |
 
-`PLAY_ONCE`, `BORDER`, and `SCREEN` only change the final assembly step, so
-switching them does not rerun the converter.
+`PLAY_ONCE`, `BORDER`, `SCREEN`, `COMPACT`, and `ENGINE` only change the
+final assembly step, so switching them does not rerun the converter.
+
+## Engine variants
+
+`bin/` holds one prebuilt engine per kernel set. Smaller sets give a
+smaller tape:
+
+| Binary | Kernels | Size |
+|--------|---------|------|
+| `aymax_player.bin` | all six | 6731 |
+| `aymax_player_nosamples.bin` | no `K-SAMPLE`, `K-DDS-SAMPLE` | 5689 |
+| `aymax_player_nowavetables.bin` | no `K-WAVETABLE` | 6546 |
+| `aymax_player_min.bin` | no samples, no wavetables | 5504 |
+| `aymax_player_sid.bin` | `K-COUNTDOWN` and `K-DDS-DUTY` only (SID voice and PWM) | 5088 |
+
+`psgpack.py` writes the kernels a track uses as `KernelMask` in
+`<name>_dir.inc`; each `.inc` exports its set as `AymaxKernels`. With
+`ENGINE=auto` the Makefile compares the two and takes the smallest match.
 
 ## How it works
 
 1. `scripts/taym2aymax.py` converts the `.taym` track to unpacked PSG
    records, an event stream, and the sample and wavetable data.
 2. `scripts/psgpack.py` packs the records into `<name>.pack` (a 20-lane LZ
-   stream), lays out `<name>_assets.bin` (samples and wavetables in 16 KiB
-   bank images), and writes `<name>_dir.inc` (bank sizes for the loader).
+   stream) and lays out `<name>_assets.bin` (samples and wavetables in
+   16 KiB bank images). When the pack fits in the free tail of the last
+   asset bank, it is appended there, so a small track needs one bank.
+   `<name>_dir.inc` tells the wrapper the bank sizes and where the pack is.
 3. `src/player.asm` places the engine binary, the pack, and the asset banks
-   in memory, adds a small startup stub, and writes the `.sna`.
-   `src/loader.asm` writes the `.tap`: a BASIC loader plus one block per
-   memory bank.
+   in memory, adds a small startup stub behind the engine, and writes the
+   `.sna`. `src/loader.asm` writes the `.tap`: a BASIC loader plus one
+   block per memory bank in use, and one block for the engine and stub.
 
 The data formats are described in [docs/aymax-format.md](docs/aymax-format.md).
 
@@ -126,11 +147,10 @@ The data formats are described in [docs/aymax-format.md](docs/aymax-format.md).
 
 | Bank | Address       | Contents |
 |------|---------------|----------|
-| 0, 1 | `#C000-#FFFF` | Packed track. Bank 1 only when the pack exceeds 16 KiB. |
-| 2    | `#8000-#BFFF` | Engine code and runtime RAM up to `AymaxRamEnd`; IM2 table at `#BE00-#BFC1`. |
-| 4, 6 | `#C000-#FFFF` | Asset banks. Bank 6 only when the track needs it. |
+| 4, 6 | `#C000-#FFFF` | Asset banks: sample directory, wavetables, samples, and the packed track when it fits behind them. Bank 6 only when the track needs it. |
+| 0, 1 | `#C000-#FFFF` | Packed track when it does not fit in the asset bank. Bank 1 only when the pack exceeds 16 KiB. |
+| 2    | `#8000-#BFFF` | Engine code and runtime RAM up to `AymaxRamEnd`; IM2 table at `#BE00-#BFC1`. The startup stub sits at `AymaxProgramEnd`; it runs once before the engine uses that RAM. |
 | 5    | `#4000-#5AFF` | Screen (`SCREEN=`), or cleared to black by the stub. |
-| 5    | `#6000`       | Startup stub: screen, border, loop mode, jump into the engine. |
 | 5    | `#5D00-#5FFF` | BASIC loader and loading code (`.tap` only). |
 
 The engine never returns. It owns the CPU, the stack (`#BDFF` down), and
@@ -148,9 +168,12 @@ uses these symbols:
 | `AymaxRamEnd`      | End of engine RAM. Nothing else may live in `#8000` to here. |
 | `AymaxLoopImm`     | 16-bit word that selects the end-of-track node. |
 | `AymaxLoopReset`, `AymaxStopReset` | Values for `AymaxLoopImm`: loop, or play once. |
-| `AymaxPackBank`, `AymaxPageBase` | Bank and address of the packed track (0, `#C000`). |
+| `AymaxPackStart`, `AymaxPackBankInit` | Pack header address and `#7FFD` value of the first pack bank. The stub writes them before entry; defaults are `#C000` in bank 0. |
+| `AymaxPackBank`, `AymaxPageBase` | Default pack bank and the paged window (0, `#C000`). |
+| `AymaxKernels` | Bit mask of the kernels in this variant (bit = kernel id). |
+| `AymaxHasSamples`, `AymaxHasWavetables` | 1 when the variant has the sample kernels, the wavetable kernel. |
 | `AymaxAssetBank0`, `AymaxAssetBank1` | Asset banks (4, 6). |
-| `AymaxSampleDir`   | 256-byte page that receives the sample directory at start. |
+| `AymaxSampleDir`   | 256-byte page that receives the sample directory at start. Only in variants with sample kernels. |
 | `AymaxBorderOp`    | Opcode of the border `out`; write `#DB` to turn the border effect off. |
 
 ## Limits
@@ -171,7 +194,7 @@ uses these symbols:
 - `Makefile` -- build driver.
 - `src/player.asm` -- wrapper: engine, pack, assets, startup stub, `.sna`.
 - `src/loader.asm` -- 128K tape loader and `.tap` writer.
-- `bin/aymax_player.bin`, `bin/aymax_player.inc` -- prebuilt engine and symbols.
+- `bin/aymax_player*.bin`, `bin/aymax_player*.inc` -- prebuilt engine variants and their symbols.
 - `scripts/taym2aymax.py`, `scripts/psgpack.py`, `scripts/aymax_fx.py`,
   `scripts/aymax_assets.py` -- the converter.
 - `scripts/taym/` -- TAYM format package (submodule).

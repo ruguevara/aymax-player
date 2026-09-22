@@ -7,17 +7,13 @@
 Prog           equ 23755                  ; PROG on load
 RomCls         equ #0D6B
 RomLoadBytes   equ #0556
-TapPackLen0    equ PACK_BYTES <? 16384
 TapAssetLen0   equ AssetUsed0
 TapAssetLen1   equ AssetUsed1
-TapProgramLen  equ StartEnd - Start
+TapProgramLen  equ StartEnd - FastMem   ; engine + stub, one block
 
-        assert TapPackLen0 > 0
-        assert TapPackLen0 == PackEnd0 - AymaxPageBase
-        assert TapAssetLen0 > 0
+        assert TapAssetLen0 > 0 || !AssetNeeded
         assert TapAssetLen0 <= 16384
         assert TapAssetLen1 <= 16384
-        assert TapProgramLen > 0
         assert AymaxProgramEnd <= AymaxRamEnd
 
         slot 1
@@ -40,20 +36,23 @@ TapLoaderStart
         call .load
     endif
 
+    if !PackInAssets
         ld a, AymaxPackBank
         call .page
         ld ix, AymaxPageBase
         ld de, PackEnd0 - AymaxPageBase
         call .load
 
-    if PACK_BYTES > 16384
+    if PackBytes > 16384
         ld a, AymaxPackBank + 1
         call .page
         ld ix, AymaxPageBase
         ld de, PackEnd1 - AymaxPageBase
         call .load
     endif
+    endif
 
+    if AssetNeeded
         ld a, AymaxAssetBank0
         call .page
         ld ix, AymaxPageBase
@@ -67,18 +66,13 @@ TapLoaderStart
         ld de, TapAssetLen1
         call .load
     endif
+    endif
 
-        ; Run-once stub loads with no paging needed: bank 5 is always slot 1.
-        ld ix, Start
-        ld de, TapProgramLen
-        call .load
-
-        ld a, AymaxPackBank
-        call .page
+        ; Engine + stub load with no paging needed: bank 2 is always slot 2.
         ld hl, Start
         push hl
         ld ix, FastMem
-        ld de, AymaxProgramEnd - FastMem
+        ld de, TapProgramLen
         jp .load
 
 .page
@@ -96,6 +90,7 @@ TapLoaderStart
         db #0D
 TapRemEnd
 
+    ifndef COMPACT_LOADER
         db 0, 10                           ; line 10, big-endian
         dw .checkEnd - .check
 .check
@@ -103,6 +98,7 @@ TapRemEnd
         db #C9, #B0, '"', "159", '"', #CB ; <> VAL "159" THEN
         db #EC, #B0, '"', "100", '"', #0D ; GO TO VAL "100"
 .checkEnd
+    endif
 
         db 0, 20                           ; line 20, big-endian
         dw .runEnd - .run
@@ -114,6 +110,7 @@ TapRemEnd
         db ':', #F9, #C0, #B0             ; RANDOMIZE USR VAL
         db '"', "23760", '"', #0D
 .runEnd
+    ifndef COMPACT_LOADER
         db 0, 100                          ; line 100, big-endian
         dw .styleEnd - .style
 .style
@@ -160,12 +157,17 @@ TapRemEnd
 .stop
         db #E2, #0D                       ; STOP
 .stopEnd
+    endif ; COMPACT_LOADER
 TapBasicEnd
         assert TapBasicEnd <= 24575 - 256   ; leave room for the BASIC stack under RAMTOP
 
 ; The block order matches the calls above. HEADLESS writes raw ROM tape blocks.
         emptytap TAP_OUTPUT
+    ifdef COMPACT_LOADER
+        savetap TAP_OUTPUT, BASIC, "AYMAX play", TapBasicStart, TapBasicEnd - TapBasicStart, 20
+    else
         savetap TAP_OUTPUT, BASIC, "AYMAX play", TapBasicStart, TapBasicEnd - TapBasicStart, 10
+    endif
 
     ifdef SCREEN_FILE
         slot 1
@@ -175,16 +177,19 @@ TapBasicEnd
     endif
 
         slot 3
+    if !PackInAssets
         page AymaxPackBank
         org AymaxPageBase
         savetap TAP_OUTPUT, HEADLESS, AymaxPageBase, PackEnd0 - AymaxPageBase
 
-    if PACK_BYTES > 16384
+    if PackBytes > 16384
         page AymaxPackBank + 1
         org AymaxPageBase
         savetap TAP_OUTPUT, HEADLESS, AymaxPageBase, PackEnd1 - AymaxPageBase
     endif
+    endif
 
+    if AssetNeeded
         page AymaxAssetBank0
         org AymaxPageBase
         savetap TAP_OUTPUT, HEADLESS, AymaxPageBase, TapAssetLen0
@@ -194,13 +199,9 @@ TapBasicEnd
         org AymaxPageBase
         savetap TAP_OUTPUT, HEADLESS, AymaxPageBase, TapAssetLen1
     endif
-
-        slot 1
-        page 5
-        org Start
-        savetap TAP_OUTPUT, HEADLESS, Start, TapProgramLen
+    endif
 
         slot 2
         page 2
         org FastMem
-        savetap TAP_OUTPUT, HEADLESS, FastMem, AymaxProgramEnd - FastMem
+        savetap TAP_OUTPUT, HEADLESS, FastMem, TapProgramLen

@@ -8,10 +8,19 @@
 ; AYMax public player wrapper. Loads the prebuilt engine plus a converted
 ; track, then jumps into the engine. Assemble with sjasmplus, defines:
 ;   PACK_FILE, ASSET_FILE, DIR_INC, SNA_OUTPUT, TAP_OUTPUT (quoted paths)
+;   ENGINE_BIN, ENGINE_INC (optional) -- engine variant, default the full one
 ;   PLAY_ONCE (optional) -- play the track once instead of looping
 ;   NO_BORDER (optional) -- keep the border black instead of the noise effect
 ;   SCREEN_FILE (optional) -- 6912-byte .scr shown while the track plays
+;   COMPACT_LOADER (optional) -- BASIC loader without the 128K check
         device zxspectrum128
+
+    ifndef ENGINE_BIN
+        define ENGINE_BIN "aymax_player.bin"
+    endif
+    ifndef ENGINE_INC
+        define ENGINE_INC "aymax_player.inc"
+    endif
 
 ; ZX Spectrum 128K memory map (subset needed here).
 SlowMem     equ #6000           ; contended RAM
@@ -19,48 +28,52 @@ FastMem     equ #8000           ; uncontended fast RAM
 
 ROM_128K    equ %00010000       ; #7FFD bit
 
-        include "aymax_player.inc"
+        include ENGINE_INC
         include DIR_INC
+
+; The engine variant must have every kernel the track uses (ENGINE=auto
+; picks one that does; a forced ENGINE= may not).
+    if KernelMask & ~AymaxKernels
+        display "error: the track uses kernels this engine variant lacks (track mask ", /D, KernelMask, ", engine ", /D, AymaxKernels, "); use ENGINE=auto or ENGINE=full"
+        assert 0
+    endif
 
 ; Engine binary: ORG #8000, self-contained.
         slot 2
         org FastMem
-        incbin "aymax_player.bin"
+        incbin ENGINE_BIN
         assert $ == AymaxProgramEnd
 
-; Packed track: bank AymaxPackBank at AymaxPageBase, overflow to bank + 1.
-        lua allpass
-            local path = sj.get_define("PACK_FILE")
-            path = path:gsub('"', '')
-            local f = assert(io.open(path, "rb"))
-            local n = f:seek("end")
-            f:close()
-            sj.insert_label("PACK_BYTES", n)
-        endlua
-
+; Packed track. psgpack appends it to the last asset bank when it fits
+; (PackBank/PackOffset in DIR_INC); otherwise it is a separate file in
+; bank AymaxPackBank at AymaxPageBase, overflow to bank + 1.
+PackInAssets equ PackBank == AymaxAssetBank0 || PackBank == AymaxAssetBank1
         slot 3
+    if !PackInAssets
+        assert PackBank == AymaxPackBank && PackOffset == 0
         page AymaxPackBank
         org AymaxPageBase
-PackStart
-        if PACK_BYTES > 16384
+        if PackBytes > 16384
             incbin PACK_FILE, 0, 16384
         else
             incbin PACK_FILE
         endif
 PackEnd0 equ $
-        assert PackEnd0 <= #10000
-        if PACK_BYTES > 16384
+        if PackBytes > 16384
             page AymaxPackBank + 1
             org AymaxPageBase
             incbin PACK_FILE, 16384
 PackEnd1 equ $
             assert PackEnd1 <= #10000
-        else
-PackEnd1 equ PackStart
         endif
-        assert PACK_BYTES <= 32768
+        assert PackBytes <= 32768
+    endif
 
-; Shared sample/wavetable assets: bank AymaxAssetBank0, overflow to bank 1.
+; Shared sample/wavetable assets (plus the pack when PackInAssets): bank
+; AymaxAssetBank0, overflow to AymaxAssetBank1. A track without samples
+; and wavetables needs no asset bank unless the pack lives there.
+AssetNeeded equ PackInAssets || SampleCount || WavetableCount
+    if AssetNeeded
         page AymaxAssetBank0
         org AymaxPageBase
         incbin ASSET_FILE, 0, 16384
@@ -68,6 +81,7 @@ PackEnd1 equ PackStart
         page AymaxAssetBank1
         org AymaxPageBase
         incbin ASSET_FILE, 16384, 16384
+    endif
     endif
 
 ; Optional screen, shown while the track plays.
@@ -79,8 +93,12 @@ PackEnd1 equ PackStart
         assert $ == #5B00
     endif
 
-; Run-once stub in slow RAM (page 5): select the loop mode, enter the engine.
-        org #6000
+; Run-once stub right behind the engine in bank 2, so one tape block holds
+; both. It sits in engine RAM: it runs before the engine touches that RAM
+; and never returns. Points the engine at the pack, selects the loop mode.
+        slot 2
+        page 2
+        org AymaxProgramEnd
 Start
         di
         xor a
@@ -92,6 +110,10 @@ Start
         ld (hl), a
         ldir
     endif
+        ld hl, AymaxPageBase + PackOffset
+        ld (AymaxPackStart), hl
+        ld a, ROM_128K | PackBank
+        ld (AymaxPackBankInit), a
     ifdef PLAY_ONCE
         ld hl, AymaxStopReset
         ld (AymaxLoopImm), hl
@@ -102,6 +124,7 @@ Start
     endif
         jp AymaxPlayerStart
 StartEnd
+        assert StartEnd <= AymaxRamEnd
 
         savesna SNA_OUTPUT, Start
 

@@ -224,11 +224,17 @@ consumption order, not grouped by lane.
 ```text
 +0  u16 frame_count
 +2  u16 loop_frame
-+4  u16 loop_offset      byte offset (from blob start) of the loop block
-+6  u16 data_offset      byte offset (from blob start) of the first byte
-                         of the interlaced prefix block, always 8
++4  u16 loop_offset      position (from #C000 of the first pack bank) of
+                         the loop block
++6  u16 data_offset      position of the first byte of the interlaced
+                         prefix block: bank offset of the blob + 8
 +8  interlaced prefix block, then interlaced loop block
 ```
+
+Positions count from the start of the first pack bank, not from the blob:
+a blob that starts at byte `bank_offset` of its bank has
+`data_offset = bank_offset + 8`. A blob placed at the bank start has
+`data_offset = 8`.
 
 A frame's interlaced bytes must never start at an offset whose low 14 bits
 are `>= 0x3F00` (the last 256 bytes of a bank). A frame consumes at most 40
@@ -238,15 +244,21 @@ last 256 bytes of a bank, the packer emits zero pad bytes up to the next
 multiple of `0x4000` and starts the frame at the bank start instead. The
 rule applies at every frame start, including the first frame of the loop
 block. `loop_offset` may point at such a pad: the runtime bank check at
-frame start skips it. `data_offset` is always 8.
+frame start skips it. The rule uses bank positions, so a blob that starts
+late in a bank pads sooner.
 
 ### 4.6 Bank placement and size cap
 
 The blob (header + prefix block + loop block, including any frame-start
 pad) must fit in `2 * 16384 = 32768` bytes. It maps onto consecutive 16 KiB
-pages at `#C000`, starting at hardware bank 0: bytes `0 .. 16383` in bank 0,
+pages at `#C000`. With `--pack-in-assets` the packer first tries to append
+the blob to the free tail of the last asset bank (bank 4, or bank 6 when
+used); if the whole blob fits there, `_assets.bin` contains it and
+`_dir.inc` reports the bank and offset. Otherwise, and always without the
+flag, the blob starts at hardware bank 0: bytes `0 .. 16383` in bank 0,
 bytes `16384 .. 32767` in bank 1 (if present). A one-bank track occupies
-only bank 0.
+only bank 0. `<stem>.pack` is written in both cases; in the appended case
+it is a copy of the asset bank tail.
 
 `frame_count` must be at least 1; a zero-frame pack is rejected.
 `loop_frame` must satisfy `0 <= loop_frame < frame_count`.
@@ -254,8 +266,9 @@ only bank 0.
 ## 5. Asset banks: `<stem>_assets.bin`
 
 `_assets.bin` holds packed samples and canonical wavetables, shared by every
-kernel that references them. It loads at `#C000` in hardware bank 4, and,
-if it overflows, continues in bank 6. File size is 16384 bytes (one bank)
+kernel that references them, and, with `--pack-in-assets`, the packed track
+when it fits behind them (section 4.6). It loads at `#C000` in hardware
+bank 4, and, if it overflows, continues in bank 6. File size is 16384 bytes (one bank)
 or 32768 bytes (two banks); each present bank is padded to a full 16 KiB
 image.
 
@@ -306,12 +319,26 @@ the asset directory asm:
 AssetBankCount equ <1 or 2>
 AssetUsed0 equ <bytes used in bank 4, 0..16384>
 AssetUsed1 equ <bytes used in bank 6, 0..16384>
+PackBank equ <hardware bank holding the pack header: 0, 4, or 6>
+PackOffset equ <byte offset of the pack header in that bank>
+PackBytes equ <blob size>
+SampleCount equ <samples in the track>
+WavetableCount equ <wavetables in the track>
+KernelMask equ <bit i set = kernel id i has a START or MODIFY entry>
 ```
 
 `AssetBankCount` tells the wrapper how many asset banks to load/page in (1
 if only bank 4 is used, 2 if bank 6 also holds data). `AssetUsed0` and
-`AssetUsed1` give the exact used byte count per bank, so a loader can copy
-only the live portion of `_assets.bin` instead of the full padded image.
+`AssetUsed1` give the exact used byte count per bank (including an appended
+pack), so a loader can copy only the live portion of `_assets.bin` instead
+of the full padded image. `SampleCount` and `WavetableCount` let a wrapper skip the asset bank for
+a track without assets. `KernelMask` names the kernels the track uses, so a
+wrapper can pick an engine build that has them. `PackBank`/`PackOffset`
+locate the pack header:
+bank 0 offset 0 when the pack is a separate `<stem>.pack` in banks 0/1,
+else the asset bank and offset it was appended at. The wrapper writes
+`#C000 + PackOffset` to `AymaxPackStart` and the `#7FFD` value of
+`PackBank` to `AymaxPackBankInit` before entering the engine.
 
 `psgpack.py` also writes a separate, longer asset directory asm (default
 path `src/gen/asset_dir.g.asm`, overridable with `--dir-asm`) with the full

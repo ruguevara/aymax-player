@@ -139,8 +139,62 @@ def test_write_dir_inc():
         assert f"AssetBankCount equ {assets.bank_count}" in text
         assert f"AssetUsed0 equ {assets.bank_used[0]}" in text
         assert f"AssetUsed1 equ {assets.bank_used[1]}" in text
+        assert "PackBank equ 0" in text
         assert "SampleDirTable" not in text
     print("ok  write_dir_inc")
+
+
+def test_pack_bank_offset_and_append():
+    n, loop_frame = 300, 100
+    rng = random.Random(7)
+    lanes = [bytes(rng.randrange(16) for _ in range(n)) for _ in range(psgpack.NLANES)]
+    offset = 0x3E00
+    blob = psgpack.pack(lanes, loop_frame, offset)
+    frame_count, hdr_loop, loop_ofs, data_off = struct.unpack_from("<HHHH", blob, 0)
+    assert (frame_count, hdr_loop) == (n, loop_frame)
+    assert data_off == offset + psgpack.HEADER_SIZE
+    # the first frame starts inside the bank tail, so the pad rule moves it to the next bank
+    assert loop_ofs >= 0x4000
+    out_lanes, out_loop = psgpack.unpack(blob, offset)
+    assert out_loop == loop_frame and out_lanes == lanes
+    try:
+        psgpack.unpack(blob)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("unpack without the bank offset must fail")
+
+    assets = psgpack.AssetBankSet([bytes([3]) * 20], [])
+    assets.build()
+    bank, tail = assets.pack_tail()
+    assert (bank, tail) == (4, psgpack.SAMPLE_HEADER + psgpack.SAMPLE_DIR_ENTRY + 10)
+    small = psgpack.pack(lanes[:], 0, tail)
+    image = assets.append_pack(small)
+    assert len(image) == psgpack.ASSET_BANK_SIZE
+    assert image[tail:tail + len(small)] == small
+    assert image[:tail] == assets.image[:tail]
+    assert assets.bank_used[0] == tail + len(small)
+    assert (assets.pack_bank, assets.pack_offset) == (4, tail)
+    assert psgpack.unpack(image[tail:tail + len(small)], tail)[0] == lanes
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "x_dir.inc"
+        assets.write_dir_inc(path, len(small), 0b10011)
+        text = path.read_text()
+        assert "KernelMask equ 19" in text
+        assert "SampleCount equ 1" in text
+        assert "PackBank equ 4" in text
+        assert f"PackOffset equ {tail}" in text
+        assert f"PackBytes equ {len(small)}" in text
+        assert f"AssetUsed0 equ {tail + len(small)}" in text
+    big = psgpack.AssetBankSet([bytes([3]) * 32000], [])
+    big.build()
+    try:
+        big.append_pack(bytes(psgpack.ASSET_BANK_SIZE))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("append_pack must reject a blob past the bank end")
+    print("ok  pack bank offset and append")
 
 
 def _roundtrip_block(data: bytes):
@@ -609,6 +663,7 @@ if __name__ == "__main__":
         test_asset_bank_layout,
         test_empty_assets_and_wavetable_placement,
         test_write_dir_inc,
+        test_pack_bank_offset_and_append,
         test_block_roundtrip,
         test_distance_edges,
         test_match_before_block_start_rejected,
