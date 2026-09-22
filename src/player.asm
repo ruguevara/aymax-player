@@ -13,6 +13,9 @@
 ;   NO_BORDER (optional) -- keep the border black instead of the noise effect
 ;   SCREEN_FILE (optional) -- 6912-byte .scr shown while the track plays
 ;   COMPACT_LOADER (optional) -- BASIC loader without the 128K check
+;   ZX0, ENGINE_ZX0, ASSET0_ZX0, ASSET1_ZX0, PACK0_ZX0, PACK1_ZX0 (optional) --
+;     the .tap carries the engine, the asset banks and the pack banks
+;     ZX0-compressed (paths to the .zx0 files)
         device zxspectrum128
 
     ifndef ENGINE_BIN
@@ -23,7 +26,6 @@
     endif
 
 ; ZX Spectrum 128K memory map (subset needed here).
-SlowMem     equ #6000           ; contended RAM
 FastMem     equ #8000           ; uncontended fast RAM
 
 ROM_128K    equ %00010000       ; #7FFD bit
@@ -93,13 +95,11 @@ AssetNeeded equ PackInAssets || SampleCount || WavetableCount
         assert $ == #5B00
     endif
 
-; Run-once stub right behind the engine in bank 2, so one tape block holds
-; both. It sits in engine RAM: it runs before the engine touches that RAM
-; and never returns. Points the engine at the pack, selects the loop mode.
-        slot 2
-        page 2
-        org AymaxProgramEnd
-Start
+; Run-once startup code. Points the engine at the pack, selects the loop
+; mode, jumps in. Never returns. The .sna keeps it right behind the engine
+; in bank 2 (engine RAM: it runs before the engine touches that RAM); the
+; tape loader has its own copy after the last block (loader.asm).
+        macro PLAYER_STUB
         di
         xor a
         out (#FE), a                    ; border 0
@@ -123,6 +123,13 @@ Start
         ld (AymaxBorderOp), a
     endif
         jp AymaxPlayerStart
+        endm
+
+        slot 2
+        page 2
+        org AymaxProgramEnd
+Start
+        PLAYER_STUB
 StartEnd
         assert StartEnd <= AymaxRamEnd
 

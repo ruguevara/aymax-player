@@ -45,7 +45,9 @@ time, so one timer effect is active per frame; see Limits.
 - Python 3.10 or newer (no extra packages)
 - [sjasmplus](https://github.com/z00m128/sjasmplus) 1.20 or newer on PATH
 - GNU make
-- `make setup` once, to fetch the `scripts/taym` submodule
+- `make setup` once, to fetch the `scripts/taym` and `zx0` submodules
+- A C compiler (`cc`), only for `ZX0=1`: it builds the ZX0 compressor from
+  the submodule into `build/zx0`
 
 ## Quick start
 
@@ -67,6 +69,7 @@ make TAYM=path/to/song.taym PLAY_ONCE=1             # play once, hold the last f
 make TAYM=path/to/song.taym BORDER=0                # black border
 make TAYM=path/to/song.taym SCREEN=path/to/pic.scr  # show a loading screen
 make TAYM=examples/atarized.taym SCREEN=examples/atarized.scr
+make TAYM=path/to/song.taym ZX0=1                   # ZX0-compressed tape
 make clean
 ```
 
@@ -104,11 +107,12 @@ library; the optional `atarin2ays.py --preview-wav` needs SoundFile.
 | `SCREEN=file.scr` | none | 6912-byte ZX screen (pixels + attributes) shown while the track plays. The `.sna` contains it; the tape loads it as the first block. Without it the startup code clears the screen to black. |
 | `COMPACT=1` | `0` | Drop the 128K check and its messages from the BASIC loader (about 380 bytes less tape). |
 | `ENGINE=auto` | `auto` | Engine variant: `auto` picks the smallest binary in `bin/` whose kernel set covers the track; or name one: `full`, `nosamples`, `nowavetables`, `min`, `sid`. A variant that lacks a kernel the track uses fails the build with a message. |
+| `ZX0=1` | `0` | Store the engine and every bank block (pack and assets) on the tape as [ZX0](https://github.com/einar-saukas/ZX0) streams. The loader unpacks each block after loading it. Roughly halves the tape for a typical track. The `.sna` is not affected. |
 | `PYTHON=...` | `python3` | Python interpreter used for the converter. |
 | `SJASMPLUS=...` | `sjasmplus` | Assembler binary. |
 
-`PLAY_ONCE`, `BORDER`, `SCREEN`, `COMPACT`, and `ENGINE` only change the
-final assembly step, so switching them does not rerun the converter.
+`PLAY_ONCE`, `BORDER`, `SCREEN`, `COMPACT`, `ENGINE`, and `ZX0` only change
+the final assembly step, so switching them does not rerun the converter.
 
 ## Engine variants
 
@@ -139,7 +143,12 @@ smaller tape:
 3. `src/player.asm` places the engine binary, the pack, and the asset banks
    in memory, adds a small startup stub behind the engine, and writes the
    `.sna`. `src/loader.asm` writes the `.tap`: a BASIC loader plus one
-   block per memory bank in use, and one block for the engine and stub.
+   block per memory bank in use, and one block for the engine. The loader
+   ends with its own copy of the startup stub. With `ZX0=1` the Makefile
+   compresses the engine binary and each bank block (the used part of each
+   asset bank, each 16 KiB slice of a pack outside the asset bank); the
+   loader reads each compressed block to `#6100`, unpacks it to its place
+   with `dzx0_standard` (68 bytes, inside the loader), then loads the next.
 
 The data formats are described in [docs/aymax-format.md](docs/aymax-format.md).
 
@@ -151,7 +160,8 @@ The data formats are described in [docs/aymax-format.md](docs/aymax-format.md).
 | 0, 1 | `#C000-#FFFF` | Packed track when it does not fit in the asset bank. Bank 1 only when the pack exceeds 16 KiB. |
 | 2    | `#8000-#BFFF` | Engine code and runtime RAM up to `AymaxRamEnd`; IM2 table at `#BE00-#BFC1`. The startup stub sits at `AymaxProgramEnd`; it runs once before the engine uses that RAM. |
 | 5    | `#4000-#5AFF` | Screen (`SCREEN=`), or cleared to black by the stub. |
-| 5    | `#5D00-#5FFF` | BASIC loader and loading code (`.tap` only). |
+| 5    | `#5D00-#60FF` | BASIC loader and loading code (`.tap` only). |
+| 5, 2 | `#6100-#BFFF` | `ZX0=1`, `.tap` only: one compressed block at a time, before it is unpacked. |
 
 The engine never returns. It owns the CPU, the stack (`#BDFF` down), and
 interrupt mode 2 while the track plays.
@@ -194,6 +204,7 @@ uses these symbols:
 - `Makefile` -- build driver.
 - `src/player.asm` -- wrapper: engine, pack, assets, startup stub, `.sna`.
 - `src/loader.asm` -- 128K tape loader and `.tap` writer.
+- `zx0/` -- ZX0 compressor and Z80 decompressor (submodule, BSD license).
 - `bin/aymax_player*.bin`, `bin/aymax_player*.inc` -- prebuilt engine variants and their symbols.
 - `scripts/taym2aymax.py`, `scripts/psgpack.py`, `scripts/aymax_fx.py`,
   `scripts/aymax_assets.py` -- the converter.

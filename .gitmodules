@@ -1,3 +1,6 @@
 [submodule "scripts/taym"]
 	path = scripts/taym
 	url = https://github.com/ruguevara/taym.git
+[submodule "zx0"]
+	path = zx0
+	url = https://github.com/einar-saukas/ZX0

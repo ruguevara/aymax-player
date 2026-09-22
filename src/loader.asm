@@ -3,18 +3,36 @@
 ; the REM token of line 1 is at 23760 and RANDOMIZE USR 23760 runs it.
 ; Derived from the sjasmplus SAVETAP loader in io_tape_ldrs.h (zlib license).
 ; Included after SAVESNA, so page 5 changes do not change the snapshot.
+;
+; With ZX0 every bank block and the engine block are ZX0 streams. Each loads
+; to ZxStage (#6100, above RAMTOP) and is unpacked to its place before the
+; next block loads. The screen loads as it is.
 
 Prog           equ 23755                  ; PROG on load
 RomCls         equ #0D6B
 RomLoadBytes   equ #0556
 TapAssetLen0   equ AssetUsed0
 TapAssetLen1   equ AssetUsed1
-TapProgramLen  equ StartEnd - FastMem   ; engine + stub, one block
+TapProgramLen  equ AymaxProgramEnd - FastMem
+ZxStage        equ #6100                ; #6100-#BFFF, above RAMTOP: compressed block staging
 
         assert TapAssetLen0 > 0 || !AssetNeeded
         assert TapAssetLen0 <= 16384
         assert TapAssetLen1 <= 16384
         assert AymaxProgramEnd <= AymaxRamEnd
+
+; Load one block to dest (len bytes). ZX0: load zxlen bytes to ZxStage, unpack to dest.
+        macro LOADBLK dest, len, zxlen
+    ifdef ZX0
+        ld de, zxlen
+        ld hl, dest
+        call TapUnpack
+    else
+        ld ix, dest
+        ld de, len
+        call TapLoad
+    endif
+        endm
 
         slot 1
         page 5
@@ -33,49 +51,38 @@ TapLoaderStart
     ifdef SCREEN_FILE
         ld ix, #4000
         ld de, #1B00
-        call .load
+        call TapLoad
     endif
 
     if !PackInAssets
         ld a, AymaxPackBank
-        call .page
-        ld ix, AymaxPageBase
-        ld de, PackEnd0 - AymaxPageBase
-        call .load
+        call TapPage
+        LOADBLK AymaxPageBase, PackEnd0 - AymaxPageBase, TapPack0Zx
 
     if PackBytes > 16384
         ld a, AymaxPackBank + 1
-        call .page
-        ld ix, AymaxPageBase
-        ld de, PackEnd1 - AymaxPageBase
-        call .load
+        call TapPage
+        LOADBLK AymaxPageBase, PackEnd1 - AymaxPageBase, TapPack1Zx
     endif
     endif
 
     if AssetNeeded
         ld a, AymaxAssetBank0
-        call .page
-        ld ix, AymaxPageBase
-        ld de, TapAssetLen0
-        call .load
+        call TapPage
+        LOADBLK AymaxPageBase, TapAssetLen0, TapAsset0Zx
 
     if TapAssetLen1 > 0
         ld a, AymaxAssetBank1
-        call .page
-        ld ix, AymaxPageBase
-        ld de, TapAssetLen1
-        call .load
+        call TapPage
+        LOADBLK AymaxPageBase, TapAssetLen1, TapAsset1Zx
     endif
     endif
 
-        ; Engine + stub load with no paging needed: bank 2 is always slot 2.
-        ld hl, Start
-        push hl
-        ld ix, FastMem
-        ld de, TapProgramLen
-        jp .load
+        ; Engine loads with no paging needed: bank 2 is always slot 2.
+        LOADBLK FastMem, TapProgramLen, TapProgramZx
+        PLAYER_STUB
 
-.page
+TapPage
         di
         or ROM_128K
         ld bc, #7FFD
@@ -83,10 +90,22 @@ TapLoaderStart
         ei
         ret
 
-.load
+TapLoad
         ld a, #FF
         scf
         jp RomLoadBytes
+
+    ifdef ZX0
+; In: de = compressed length, hl = destination.
+TapUnpack
+        push hl
+        ld ix, ZxStage
+        call TapLoad
+        ld hl, ZxStage
+        pop de
+        jp dzx0_standard
+        include "dzx0_standard.asm"
+    endif
         db #0D
 TapRemEnd
 
@@ -105,7 +124,7 @@ TapRemEnd
 .run
         db #E7, #B0, '"', "0", '"'        ; BORDER VAL "0"
         db ':', #DA, #B0, '"', "0", '"'   ; PAPER VAL "0"
-        db ':', #FD, #B0, '"', "24575", '"' ; CLEAR VAL "24575" (stack below the stub at #6000)
+        db ':', #FD, #B0, '"', "24831", '"' ; CLEAR VAL "24831" (RAMTOP #60FF, stack below ZxStage)
         db ':', #FB                        ; CLS
         db ':', #F9, #C0, #B0             ; RANDOMIZE USR VAL
         db '"', "23760", '"', #0D
@@ -159,7 +178,7 @@ TapRemEnd
 .stopEnd
     endif ; COMPACT_LOADER
 TapBasicEnd
-        assert TapBasicEnd <= 24575 - 256   ; leave room for the BASIC stack under RAMTOP
+        assert TapBasicEnd <= 24831 - 256   ; leave room for the BASIC stack under RAMTOP
 
 ; The block order matches the calls above. HEADLESS writes raw ROM tape blocks.
         emptytap TAP_OUTPUT
@@ -176,6 +195,49 @@ TapBasicEnd
         savetap TAP_OUTPUT, HEADLESS, #4000, #1B00
     endif
 
+    ifdef ZX0
+; The compressed blocks stage at ZxStage (pages 5 and 2, saved already) for
+; savetap, the same place the loader puts them.
+        slot 1
+        page 5
+    if !PackInAssets
+        org ZxStage
+        incbin PACK0_ZX0
+TapPack0Zx equ $ - ZxStage
+        assert ZxStage + TapPack0Zx <= AymaxPageBase
+        savetap TAP_OUTPUT, HEADLESS, ZxStage, TapPack0Zx
+
+    if PackBytes > 16384
+        org ZxStage
+        incbin PACK1_ZX0
+TapPack1Zx equ $ - ZxStage
+        assert ZxStage + TapPack1Zx <= AymaxPageBase
+        savetap TAP_OUTPUT, HEADLESS, ZxStage, TapPack1Zx
+    endif
+    endif
+
+    if AssetNeeded
+        org ZxStage
+        incbin ASSET0_ZX0
+TapAsset0Zx equ $ - ZxStage
+        assert ZxStage + TapAsset0Zx <= AymaxPageBase
+        savetap TAP_OUTPUT, HEADLESS, ZxStage, TapAsset0Zx
+
+    if TapAssetLen1 > 0
+        org ZxStage
+        incbin ASSET1_ZX0
+TapAsset1Zx equ $ - ZxStage
+        assert ZxStage + TapAsset1Zx <= AymaxPageBase
+        savetap TAP_OUTPUT, HEADLESS, ZxStage, TapAsset1Zx
+    endif
+    endif
+
+        org ZxStage
+        incbin ENGINE_ZX0
+TapProgramZx equ $ - ZxStage
+        assert ZxStage + TapProgramZx <= FastMem
+        savetap TAP_OUTPUT, HEADLESS, ZxStage, TapProgramZx
+    else
         slot 3
     if !PackInAssets
         page AymaxPackBank
@@ -205,3 +267,4 @@ TapBasicEnd
         page 2
         org FastMem
         savetap TAP_OUTPUT, HEADLESS, FastMem, TapProgramLen
+    endif
