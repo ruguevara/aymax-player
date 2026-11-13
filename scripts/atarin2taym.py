@@ -95,7 +95,7 @@ def parse_psg_framecount(data: bytes) -> int:
         if b == 0xFF:
             n += 1; i += 1
         elif b == 0xFE:
-            n += body[i + 1]; i += 2
+            n += body[i + 1] * 4; i += 2    # standard Bulba: `$FE n` is 4*n frames
         else:
             i += 2
     return n
