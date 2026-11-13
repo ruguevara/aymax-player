@@ -26,6 +26,7 @@ PSG_MAGIC = b"PSG\x1a"
 PSG_HEADER_SIZE = 16
 PSG_END = 0xFD
 PSG_SKIP = 0xFE
+PSG_SKIP_FRAMES = 4       # standard Bulba: `$FE n` is 4*n frames
 PSG_FRAME = 0xFF
 R13 = 13
 R13_NO_WRITE = 0xFF
@@ -79,7 +80,7 @@ def parse_psg(data):
         elif command == PSG_SKIP:
             if index + 1 >= len(body):
                 raise ValueError("truncated .PSG repeat command")
-            repeat_count = body[index + 1]
+            repeat_count = body[index + 1] * PSG_SKIP_FRAMES
             index += 2
             if not started:
                 started = True

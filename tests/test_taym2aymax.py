@@ -578,6 +578,15 @@ def _record_r13(records, frame):
     return rec[9]  # RECORD_ORDER index of R13
 
 
+def test_psg_skip_is_four_frames_per_unit():
+    # Standard Bulba: `$FE n` is 4*n frames. Frame 0, 4 skipped, 1 more.
+    psg = (b"PSG\x1a" + bytes(12)
+           + bytes((0xFF, 0, 0x55, 13, 9, 0xFE, 1, 0xFF, 0, 0x66, 0xFD)))
+    frames = aymax_assets.parse_psg(psg)
+    assert [f[0] for f in frames] == [0x55] * 5 + [0x66]
+    assert [f[13] for f in frames] == [9] + [0xFF] * 5
+
+
 def test_r13_retriggers_when_env_bit_rises():
     """Same envelope shape, env bit off then on: rewrite R13 so AY retriggers."""
     taym = read_taym(write_taym(_psg_only_taym([
@@ -690,6 +699,7 @@ if __name__ == "__main__":
               test_dds_sample_requires_stop_inside_frame_range,
               test_frame_limit_excludes_tail_samples,
               test_frame_range_starts_at_explicit_start,
+              test_psg_skip_is_four_frames_per_unit,
               test_r13_retriggers_when_env_bit_rises,
               test_r13_restores_after_kernel_stop,
               test_r13_queue_does_not_overwrite_new_source_shape]:
